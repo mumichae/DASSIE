@@ -1,0 +1,23 @@
+Package: DASSIE
+Type: Package
+Title: Detection of Alternative Transcription Start Sites
+Version: 0.1.0
+Author: Michaela Müller
+Maintainer: Michaela Müller <mumichae@in.tum.de>
+Description: More about what it does (maybe more than one line)
+    Use four spaces when indenting paragraphs within the Description.
+License: What license is it under?
+Encoding: UTF-8
+LazyData: true
+RoxygenNote: 7.0.2
+Imports: 
+  dplyr,
+  ggplot2,
+  ggthemes,
+  GenomicAlignments,
+  GenomicFeatures
+Depends: 
+  methods,
+  S4Vectors,
+  data.table,
+  GenomicRanges
