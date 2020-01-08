@@ -1,3 +1,46 @@
+#' Flatten data.tables with list entries
+#' 
+#' @param dt any object that can be coerced to data.table
+#' @param id_columns all columns that do not contain any lists as entries
+#' @param list_columns all columns that have list entries
+#' @param debug print unlisting statement to be evaluated for each list_column
+#' @importFrom rlang sym syms expr
+#' @importFrom purrr reduce
+#' @importFrom dplyr left_join
+#' @import data.table
+#' @export
+#' 
+unnest_dt <- function(dt, id_columns, list_columns, debug=FALSE) {
+  
+  dt <- as.data.table(dt)
+  
+  # unnest function for single dt
+  unnest_dt_single <- function(tbl, col) {
+    
+    tbl <- as.data.table(tbl)
+    col <- sym(col)
+    clnms <- syms(setdiff(colnames(tbl), as.character(col)))
+    #tbl <- as.data.table(tbl)
+    
+    cmd <- expr(tbl[, as.character(unlist(!!col)), by = list(!!!clnms)])
+    if (isTRUE(debug)) print(cmd)
+    tbl <- eval(cmd)
+    colnames(tbl) <- c(as.character(clnms), as.character(col))
+    
+    tbl
+  }
+  
+  # flatten all list columns independently
+  flattened <- lapply(list_columns, function(col) {
+    dt_sub <- dt[, .SD, .SDcols=c(id_columns,col)]
+    unnest_dt_single(dt_sub, col)
+  })
+  
+  # merge all flattened data.tables
+  merged <- data.table(reduce(flattened, left_join, by = id_columns))
+  merged
+}
+
 #' Summarise gene type
 #' 
 #' Add a column named general_gene_type to the data.table containing generalised gene type names 
@@ -108,3 +151,11 @@ gr_to_bed <- function(gr, filename, invertStrand = F) {
   write.table(dt, file=filename, quote=F, sep="\t", row.names=F, col.names=F)
   dt
 }
+
+## small helpers
+
+#'
+#' @return logical vector of all positions that have maximum value
+#' @export
+#' 
+which_max <- function(x) which(x == max(x))

@@ -34,132 +34,239 @@ featureInfo <- function(gr, columns = NULL, summary = F, rownumbers = F) {
   feature_dt
 }
 
-#' maps the exons to the transcripts
+#' Get exons from txdb
+#'
+#' @param txdb
+#' @param filter_length filter transcripts
+#'               'tx_length': by length of transcript
+#'               'gene_length': by length of gene 
+#' @param filter_exon keep transcript with longest exons
+#' @return exons in a data.table convertible to GRanges object, contains
+#'         transcript and gene mapping
+#' @import data.table
+#' @importFrom GenomicFeatures exons
+#' @export
+#'
+getExons <- function(txdb, filter_length = "tx_length", filter_exon = TRUE) {
+    
+    longest_tx <- getLongestTranscript(txdb, filter_length, filter_exon)
+    
+    # exon mapping
+    message("extract exons into data.table")
+    range_columns <- c("seqnames", "start", "end", "strand")
+    id_cols       <- c("exon_id", "exon_name")
+    list_cols     <- c("tx_id", "tx_name", "gene_id")
+    
+    exons <- exons(txdb, columns = c(id_cols, list_cols),
+                   filter=list(tx_id=longest_tx))
+    
+    exon_dt <- unnest_dt(as.data.table(exons), 
+                         id_columns = c(range_columns, id_cols),
+                         list_columns = list_cols)
+    exon_dt
+}
+
 #' 
-#'@param txdb annotation database
-#'@return
-#'
-#'@importFrom dplyr %>%
-#'@import GenomicFeatures
-#'@export
-#'
-exon_to_tx <- function(txdb) {
-  
-  exons_tx <- exonsBy(txdb, by = "tx") %>% unlist
-  tx_mapping <- mcols(transcripts(txdb)) %>% as.data.table
-  
-  tx_ids <- as.integer(names(exons_tx))
-  tx_names <- tx_mapping[tx_ids, tx_name]
-  
-  exons_tx_dt <- exons_tx %>% as.data.table
-  exons_tx_dt[, transcript_idx := tx_ids]
-  exons_tx_dt[, transcript_name := tx_names]
-  
-  exons_tx_dt
+#' @import data.table
+#' @importFrom GenomicFeatures transcriptsBy transcriptLengths
+#' 
+getLongestTranscript <- function(txdb, filter_length = "tx_length", filter_exon = TRUE) {
+    
+    message("get transcript by gene")
+    tx_by_gene <- as.data.table(transcriptsBy(txdb, by = "gene"))
+    
+    if (filter_length == "tx_length") {
+        # longest by tx length
+        message("select longest transcripts by ", filter_length)
+        tx_lengths <- as.data.table(transcriptLengths(txdb))
+        longest_tx <- tx_lengths[, .SD[which_max(tx_len)], by = gene_id]
+      
+    } else if (filter_length == "gene_length") {
+        # longest by width = longest by position in genome
+        message("select longest transcripts by ", filter_length)
+        max_width <- lapply(width(tx_by_gene), which_max)
+        longest_gene <- as.data.table(tx_by_gene[max_width])
+        
+        tx_lengths <- as.data.table(transcriptLengths(txdb))
+        longest_tx <- tx_lengths[tx_id %in% longest_gene$tx_id]
+    } else {
+        longest_tx <- tx_by_gene
+    }
+    
+    if (isTRUE(filter_exon)) {
+        # longest by number of exons
+        message("select longest transcripts by number of exons")
+        longest_tx <- longest_tx[, .SD[which_max(nexon)], by = gene_id]
+    }
+    
+    longest_tx$tx_id
 }
 
 #' Extract regions around TSS and PAS and returns a GRanges object
 #' 
 #' Convenience function for TSS and PAS regions of same length
 #' 
-#' @param exons data.table containing at least the exon coordinates (for GRanges), "transcript_id" and "exon_id" for each exon. Must be strand-specific.
+#' @param exon_dt data.table convertible into GRanges, and contain a transcript
+#'                column that is specified in tx_id. Data must be strand-specific.
 #' @param window number of bp that the regions should have
 #' @export
 #' 
-windowRegions <- function(exons, window = 500) {
-  
-  tss <- tssRegions(exons, window)
-  pas <- pasRegions(exons, window)
-  
-  feature_dt <- rbind(tss, pas)
-  # feature_dt <- merge(exons[, -c("start", "end")], feature_dt, by = c("transcript_id", "exon_id")) # add annotation info
-  feature_dt[, feature_id := 1:.N]
-  
-  regions <- makeGRangesFromDataFrame(feature_dt, keep.extra.columns = T)
-  names(regions) <- regions$feature_id
-  
-  regions
+getDassieRegions <- function(exon_dt, tssWindow = 500, pasWindow = 1000, 
+                             tx_id="tx_id", remove_redundant = TRUE) {
+    
+    tss <- tssRegions(exon_dt, window=tssWindow, tx_id=tx_id)
+    pas <- pasRegions(exon_dt, window=pasWindow, tx_id=tx_id)
+    
+    feature_dt <- rbind(tss, pas)
+    feature_dt[, feature_id := 1:.N]
+    
+    # Remove redundant regions
+    if (isTRUE(remove_redundant)) {
+      message("removing duplicated features")
+      feature_dt <- feature_dt[, .SD[1], 
+                               by = c("seqnames", "start", "end", 
+                                      "strand", "feature", "location")]
+    }
+    
+    # Convert to GenomicRanges and save
+    regions <- makeGRangesFromDataFrame(feature_dt, keep.extra.columns = T)
+    names(regions) <- regions$feature_id
+    
+    regions
 }
 
 #' Transcription start site regions
 #'
 #' Get regions of specified length around the TSS
-#' @param exons data.table containing at least the exon coordinates (for GRanges), "transcript_id" and "exon_id" for each exon. Must be strand-specific.
+#' @param exons_dt data.table of GRanges object with columns "tx_id" for each
+#'                 exon for merging by transcripts. Ranges must be strand-specific.
 #' @param window number of bp for regions
-#' @return data.table with coordinates and some metadata on the new regions
-#' exon_id and transcript_id are necessary for joining the features with the rest of the exon annotation.
+#' @return GRanges object with upstream and downstream TSS regions
+#' @import data.table
 #' @export
 #'
-tssRegions <- function(exons, window) {
+tssRegions <- function(exon_dt, window, tx_id="tx_id") {
   
-  ## strand: +
-  setorder(exons, start)
-  plus <- exons[strand == "+", .SD[1], by = "transcript_id"] # first exons
-  plus[, site := .SD[, start]] # TSS based on first exons
+  #TODO: deal with non-stranded data
   
-  US <- plus[, .(exon_id, transcript_id, transcriptID, gene_name, seqnames, strand,
-                 start = .SD$site - window, end = .SD$site - 1,
-                 feature = "TSS", location = "upstream", site)]
-  DS <- plus[, .(exon_id, transcript_id, transcriptID, gene_name, seqnames, strand,
-                 start = .SD$site, end = .SD$site + window - 1,
-                 feature = "TSS", location = "downstream", site)]
-  plus <- rbind(US, DS)
+  tssPlus <- function() {
+    # first exons
+    setorder(exon_dt, start)
+    plus <- exon_dt[strand == "+", .SD[1], by = tx_id]
+    # TSS
+    plus[, site := start]
+    
+    # ranges upstream of site
+    US <- copy(plus)
+    US[, start := site - window]
+    US[, end := site - 1]
+    US[, location := "upstream"]
+    
+    # ranges downstream of site
+    DS <- copy(plus)
+    DS[, start := site]
+    DS[, end := site + window - 1]
+    DS[, location := "downstream"]
+    
+    rbind(US, DS)
+    
+  }
   
-  ## strand: -
-  setorder(exons, -end)
-  minus <- exons[strand == "-", .SD[1], by = "transcript_id"]
-  minus[, site := .SD[, end]]
+  tssMinus <- function() {
+      # first exons
+      setorder(exon_dt, -end)
+      minus <- exon_dt[strand == "-", .SD[1], by = tx_id]
+      
+      # TSS
+      minus[, site := end]
+      
+      # ranges upstream of site
+      US <- copy(minus)
+      US[, start := site + 1]
+      US[, end := site + window]
+      US[, location := "upstream"]
+      
+      # ranges downstream of site
+      DS <- copy(minus)
+      DS[, start := site - window + 1]
+      DS[, end := site]
+      DS[, location := "downstream"]
+      
+      rbind(US, DS)
+  }
   
-  US <- minus[, .(exon_id, transcript_id, transcriptID, gene_name, seqnames, strand,
-                  start = .SD$site + 1, end = .SD$site + window,
-                  feature = "TSS", location = "upstream", site)]
-  DS <- minus[, .(exon_id, transcript_id, transcriptID, gene_name, seqnames, strand,
-                  start = .SD$site - window + 1, end = .SD$site,
-                  feature = "TSS", location = "downstream", site)]
-  minus <- rbind(US, DS)
+  tssFeatures <- rbind(tssPlus(), tssMinus())
+  tssFeatures[, feature := "TSS"]
   
-  rbind(plus, minus)
+  tssFeatures
+  
 }
 
 
 #' Polyadenylation site regions
 #' 
 #' Get regions of specified length around the PAS
-#' @param exons data.table containing at least the exon coordinates (for GRanges), "transcript_id" and "exon_id" for each exon. Must be strand-specific.
+#' @param exons_dt data.table of GRanges object with columns "tx_id" for each
+#'                 exon for merging by transcripts. Ranges must be strand-specific.
 #' @param window number of bp for regions
 #' @return data.table with coordinates and some metadata on the new regions
 #' exon_id and transcript_id are necessary for joining the features with the rest of the exon annotation.
+#' @import data.table
 #' @export
 #'
-pasRegions <- function(exons, window) {
+pasRegions <- function(exon_dt, window, tx_id="tx_id") {
   
-  ## strand: +
-  setorder(exons, -start)
-  plus <- exons[strand == "+", .SD[1], by = "transcript_id"] # last exons
-  plus[, site := .SD[, end]] # PAS
+  pasPlus <- function() {
+      # last exons
+      setorder(exon_dt, -start)
+      plus <- exon_dt[strand == "+", .SD[1], by = tx_id]
+      
+      # PAS
+      plus[, site := end]
+      
+      # ranges upstream of site
+      US <- copy(plus)
+      US[, start := site - window + 1]
+      US[, end := site]
+      US[, location := "upstream"]
+      
+      # ranges downstream of site
+      DS <- copy(plus)
+      DS[, start := site + 1]
+      DS[, end := site + window]
+      DS[, location := "downstream"]
+      
+      rbind(US, DS)
+  }
   
-  US <- plus[, .(exon_id, transcript_id, transcriptID, gene_name, seqnames, strand,
-                 start = .SD$site - window + 1, end = .SD$site,
-                 feature = "PAS", location = "upstream", site)]
-  DS <- plus[, .(exon_id, transcript_id, transcriptID, gene_name, seqnames, strand,
-                 start = .SD$site + 1, end = .SD$site + window,
-                 feature = "PAS", location = "downstream", site)]
-  plus <- rbind(US, DS)
+  pasMinus <- function() {
+      # last exons
+      setorder(exon_dt, end)
+      minus <- exon_dt[strand == "-", .SD[1], by = tx_id]
+      
+      # PAS
+      minus[, site := start]
+      
+      # ranges upstream of site
+      US <- copy(minus)
+      US[, start := site]
+      US[, end := site + window - 1]
+      US[, location := "upstream"]
+      
+      # ranges downstream of site
+      DS <- copy(minus)
+      DS[, start := site - window]
+      DS[, end := site - 1]
+      DS[, location := "downstream"]
+      
+      rbind(US, DS)
+  }
   
-  ## strand: -
-  setorder(exons, end)
-  minus <- exons[strand == "-", .SD[1], by = "transcript_id"]
-  minus[, site := .SD[, start]]
+  pasFeatures <- rbind(pasPlus(), pasMinus())
+  pasFeatures[, feature := "PAS"]
   
-  US <- minus[, .(exon_id, transcript_id, transcriptID, gene_name, seqnames, strand,
-                  start = .SD$site, end = .SD$site + window - 1,
-                  feature = "PAS", location = "upstream", site)]
-  DS <- minus[, .(exon_id, transcript_id, transcriptID, gene_name, seqnames, strand,
-                  start = .SD$site - window, end = .SD$site - 1,
-                  feature = "PAS", location = "downstream", site)]
-  minus <- rbind(US, DS)
+  pasFeatures
   
-  rbind(plus, minus)
 }
 
 

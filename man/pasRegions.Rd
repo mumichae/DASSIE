@@ -4,12 +4,13 @@
 \alias{pasRegions}
 \title{Polyadenylation site regions}
 \usage{
-pasRegions(exons, window)
+pasRegions(exon_dt, window, tx_id = "tx_id")
 }
 \arguments{
-\item{exons}{data.table containing at least the exon coordinates (for GRanges), "transcript_id" and "exon_id" for each exon. Must be strand-specific.}
-
 \item{window}{number of bp for regions}
+
+\item{exons_dt}{data.table of GRanges object with columns "tx_id" for each
+exon for merging by transcripts. Ranges must be strand-specific.}
 }
 \value{
 data.table with coordinates and some metadata on the new regions
