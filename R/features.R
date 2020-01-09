@@ -47,7 +47,7 @@ featureInfo <- function(gr, columns = NULL, summary = F, rownumbers = F) {
 #' @importFrom GenomicFeatures exons
 #' @export
 #'
-getExons <- function(txdb, filter_length = "tx_length", filter_exon = TRUE) {
+getExonsDt <- function(txdb, filter_length = "tx_length", filter_exon = TRUE) {
     
     longest_tx <- getLongestTranscript(txdb, filter_length, filter_exon)
     
@@ -122,10 +122,12 @@ getDassieRegions <- function(exon_dt, tssWindow = 500, pasWindow = 1000,
     
     # Remove redundant regions
     if (isTRUE(remove_redundant)) {
-      message("removing duplicated features")
+      before <- nrow(feature_dt)
       feature_dt <- feature_dt[, .SD[1], 
                                by = c("seqnames", "start", "end", 
                                       "strand", "feature", "location")]
+      after <- before - nrow(feature_dt)
+      message("removed ", after, " duplicated features")
     }
     
     # Convert to GenomicRanges and save
@@ -151,9 +153,7 @@ tssRegions <- function(exon_dt, window, tx_id="tx_id") {
   
   tssPlus <- function() {
     # first exons
-    setorder(exon_dt, start)
-    plus <- exon_dt[strand == "+", .SD[1], by = tx_id]
-    # TSS
+    plus <- subsetExons(exon_dt, by = "tx_id", which = "first", strand = "+")
     plus[, site := start]
     
     # ranges upstream of site
@@ -169,16 +169,12 @@ tssRegions <- function(exon_dt, window, tx_id="tx_id") {
     DS[, location := "downstream"]
     
     rbind(US, DS)
-    
   }
   
   tssMinus <- function() {
       # first exons
-      setorder(exon_dt, -end)
-      minus <- exon_dt[strand == "-", .SD[1], by = tx_id]
-      
-      # TSS
-      minus[, site := end]
+      minus <- subsetExons(exon_dt, by = "tx_id", which = "first", strand = "-")
+      minus[, site := end] # position of TSS
       
       # ranges upstream of site
       US <- copy(minus)
@@ -218,11 +214,8 @@ pasRegions <- function(exon_dt, window, tx_id="tx_id") {
   
   pasPlus <- function() {
       # last exons
-      setorder(exon_dt, -start)
-      plus <- exon_dt[strand == "+", .SD[1], by = tx_id]
-      
-      # PAS
-      plus[, site := end]
+      plus <- subsetExons(exon_dt, by = "tx_id", which = "last", strand = "+")
+      plus[, site := end] # position of PAS
       
       # ranges upstream of site
       US <- copy(plus)
@@ -241,11 +234,8 @@ pasRegions <- function(exon_dt, window, tx_id="tx_id") {
   
   pasMinus <- function() {
       # last exons
-      setorder(exon_dt, end)
-      minus <- exon_dt[strand == "-", .SD[1], by = tx_id]
-      
-      # PAS
-      minus[, site := start]
+      minus <- subsetExons(exon_dt, by = "tx_id", which = "last", strand = "-")
+      minus[, site := start] # position of PAS
       
       # ranges upstream of site
       US <- copy(minus)
@@ -270,31 +260,43 @@ pasRegions <- function(exon_dt, window, tx_id="tx_id") {
 }
 
 
-#'
-#' simple function that takes the first hit after sorting
+#' Extract first/last exons depending on strand
+#' takes the first hit after sorting
 #' @param dt containing exon info
 #' @param by sorting criterium (transcript or gene)
+#' @import data.table
 #' @export
 #'
-get_first_exons <- function(dt, by) {
-  setorder(dt, start)
-  plus <- dt[strand == "+", .SD[1], by = by]
-  setorder(dt, -end)
-  minus <- dt[strand == "-", .SD[1], by = by]
-  rbind(plus, minus)
-}
-
-#'
-#' simple function that takes the first hit after sorting
-#' @param dt containing exon info
-#' @param by sorting criterium (transcript or gene)
-#' @export
-#'
-get_last_exons <- function(dt, by) {
-  # dt <- dt[seqnames != "MT" & seqnames != "chrM"] # remove mitochondrial DNA
-  setorder(dt, -start)
-  plus <- dt[strand == "+", .SD[1], by = by]
-  setorder(dt, end)
-  minus <- dt[strand == "-", .SD[1], by = by]
-  rbind(plus, minus)
+subsetExons <- function(exon_dt, by, which = "first", strand = "both") {
+  
+  stopifnot(strand %in% c("+", "-", "*", "plus", "minus", "both"))
+  stopifnot(which %in% c("first", "last"))
+  
+  all_exon_dt <- exon_dt
+  exon_dt <- exon_dt[0] # initialise
+  
+  plus  <- strand %in% c("plus", "+", "both", "*")
+  minus <- strand %in% c("minus", "-", "both", "*")
+  
+  if (which == "first") {
+      if (plus) {
+          setorder(all_exon_dt, start)
+          exon_dt <- rbind(exon_dt, all_exon_dt[strand == "+", .SD[1], by = by])
+      }
+      if (minus) {
+          setorder(all_exon_dt, -end)
+          exon_dt <- rbind(exon_dt, all_exon_dt[strand == "-", .SD[1], by = by])
+      }
+  } else if(which == "last") {
+      if (plus) {
+          setorder(all_exon_dt, -start)
+          exon_dt <- rbind(exon_dt, all_exon_dt[strand == "+", .SD[1], by = by])
+      }
+      if (minus) {
+          setorder(all_exon_dt, end)
+          exon_dt <- rbind(exon_dt, all_exon_dt[strand == "-", .SD[1], by = by])
+      }
+  }
+  
+  exon_dt
 }
